@@ -789,98 +789,39 @@ def _to_file_uri(path: str) -> str:
 
 
 def OmniEmbed_process_fn(model_inputs: dict, processor, max_length=204800):
-    """
-    Process inputs for NVIDIA Omni-Embed-Nemotron-3B.
-    
-    CRITICAL: This model requires "query: " prefix for queries and "passage: " prefix for documents.
-    The model was trained with these prefixes and will produce poor results without them.
-    
-    See: https://huggingface.co/nvidia/omni-embed-nemotron-3b
-    """
     from qwen_omni_utils import process_mm_info
-    import os
 
     texts = model_inputs["text"]
     visuals = model_inputs.get("images", [None] * len(texts))
-    
-    # Get encode_side if provided by collator (preferred method)
-    encode_side = model_inputs.get("encode_side", None)
-    
-    # Debug logging (enable with DEBUG_OMNI=1)
-    debug_mode = os.environ.get("DEBUG_OMNI", "0") == "1"
-    if debug_mode and len(texts) > 0:
-        print(f"\n[DEBUG OmniEmbed] encode_side={encode_side}, num_texts={len(texts)}")
-        print(f"[DEBUG OmniEmbed] First text (before prefix): {repr(texts[0][:100] if texts[0] else None)}...")
-        print(f"[DEBUG OmniEmbed] First visual type: {type(visuals[0]) if visuals else None}")
 
     # Batch of conversations: List[List[{"role": ..., "content": ...}]]
     conversations = []
-    for idx, (text, vis) in enumerate(zip(texts, visuals)):
+    for text, vis in zip(texts, visuals):
         if text is None:
             text = ""
         elif not isinstance(text, str):
+            # fail fast (better than silently stringifying random objects)
             raise TypeError(f"OmniEmbed_process_fn expected text to be str/None, got {type(text)}")
-
-        # === KEY FIX: Add prefix if not already present ===
-        # The omni-embed model REQUIRES these prefixes for proper retrieval performance.
-        # Without them, nDCG@5 drops by ~20-40 points across all benchmarks.
-        original_text = text
-        if not text.startswith("query: ") and not text.startswith("passage: "):
-            if encode_side == "qry":
-                text = "query: " + text
-            elif encode_side in ("tgt", "cand"):
-                text = "passage: " + text
-            else:
-                # Heuristic fallback: if there's a visual, it's a document (passage)
-                # If no visual, it's likely a query
-                # This works for ViDoRe where docs have images and queries are text-only
-                if vis is not None:
-                    text = "passage: " + text
-                else:
-                    text = "query: " + text
-        
-        if debug_mode and idx == 0:
-            print(f"[DEBUG OmniEmbed] First text (after prefix): {repr(text[:100])}...")
-        # === END KEY FIX ===
 
         content = [{"type": "text", "text": text}]
 
         if vis is None:
             pass
         elif isinstance(vis, list):
-            if len(vis) == 1:
-                # === KEY FIX: Single image wrapped in list - treat as IMAGE, not video ===
-                # This is critical for ViDoRe where each document is a single page image.
-                # The collator wraps single images in a list, but we should process them
-                # as images, not as single-frame videos.
-                frame = vis[0]
+            # treat list[PIL] as video frames
+            frame_uris = []
+            for frame in vis:
                 fp = getattr(frame, "filename", None)
                 if not fp:
                     raise ValueError(
-                        "OmniEmbed_process_fn expected image to have .filename "
-                        "(loaded from disk). If your image is in-memory bytes, "
+                        "OmniEmbed_process_fn expected each frame to have .filename "
+                        "(loaded from disk). If your frames are in-memory bytes, "
                         "you must modify the dataset loader to retain paths."
                     )
-                content.append({"type": "image", "image": _to_file_uri(fp)})
-                if debug_mode and idx == 0:
-                    print(f"[DEBUG OmniEmbed] Processing as SINGLE IMAGE: {fp}")
-            else:
-                # Multiple frames - treat as video
-                frame_uris = []
-                for frame in vis:
-                    fp = getattr(frame, "filename", None)
-                    if not fp:
-                        raise ValueError(
-                            "OmniEmbed_process_fn expected each frame to have .filename "
-                            "(loaded from disk). If your frames are in-memory bytes, "
-                            "you must modify the dataset loader to retain paths."
-                        )
-                    frame_uris.append(_to_file_uri(fp))
-                content.append({"type": "video", "video": frame_uris})
-                if debug_mode and idx == 0:
-                    print(f"[DEBUG OmniEmbed] Processing as VIDEO with {len(frame_uris)} frames")
+                frame_uris.append(_to_file_uri(fp))
+            content.append({"type": "video", "video": frame_uris})
         else:
-            # single image (not wrapped in list)
+            # single image
             fp = getattr(vis, "filename", None)
             if not fp:
                 raise ValueError(
@@ -889,8 +830,6 @@ def OmniEmbed_process_fn(model_inputs: dict, processor, max_length=204800):
                     "you must modify the dataset loader to retain paths."
                 )
             content.append({"type": "image", "image": _to_file_uri(fp)})
-            if debug_mode and idx == 0:
-                print(f"[DEBUG OmniEmbed] Processing as SINGLE IMAGE (unwrapped): {fp}")
 
         # IMPORTANT: one conversation per sample
         conversations.append([{"role": "user", "content": content}])
@@ -920,10 +859,6 @@ def OmniEmbed_process_fn(model_inputs: dict, processor, max_length=204800):
         audio=audio,
         return_tensors="pt",
         text_kwargs=dict(truncation=True, padding=True, max_length=max_length),
-        images_kwargs=dict(
-            min_pixels=64 * 14 * 14,
-            max_pixels=256 * 28 * 28,
-        ),
         videos_kwargs=dict(
             min_pixels=32 * 14 * 14,
             max_pixels=64 * 28 * 28,

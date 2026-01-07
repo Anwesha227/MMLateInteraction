@@ -3,8 +3,8 @@
 #SBATCH -p gpuA100x4
 #SBATCH --gpus=1
 #SBATCH --mem=64g
-#SBATCH -t 01:00:00
-#SBATCH -J vlm2vecv2_image
+#SBATCH -t 03:00:00
+#SBATCH -J omni_image_ultra_hres_1
 #SBATCH -o logs/%x-%j.out
 #SBATCH -e logs/%x-%j.out
 
@@ -17,4 +17,4 @@ export PYTORCH_ALLOC_CONF=expandable_segments:True
 export HF_HOME=/projects/bfln/abasu2/cache/hf
 export HF_HUB_ENABLE_HF_TRANSFER=0
 
-bash /u/abasu2/VLM2Vec/experiments/public/eval/run_vlm2vecv2_image_visdoc.sh
+bash /u/abasu2/VLM2Vec/experiments/public/eval/run_omni_image_visdoc.sh

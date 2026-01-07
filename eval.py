@@ -30,6 +30,11 @@ from src.utils.basic_utils import batch_to_device, print_rank, print_master
 logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(levelname)s [%(name)s:%(lineno)s] %(message)s')
 logger = logging.getLogger(__name__)
 
+class SuppressQwenAudioWarning(logging.Filter):
+    def filter(self, record):
+        return "System prompt modified, audio output may not work as expected" not in record.getMessage()
+logging.getLogger().addFilter(SuppressQwenAudioWarning())
+
 
 def pad_dataset_to_divisible(dataset, world_size):
     num_samples = len(dataset)
@@ -70,7 +75,28 @@ def encode_embeddings(
     model.eval()
     with torch.no_grad():
         for inputs, dataset_info in tqdm(loader, desc=f"{description} (rank {local_rank})", disable=local_rank > 0):
+            if local_rank == 0 and encode_side != "qry" and len(local_gt_infos) == 0:
+                print("DEBUG encode_side:", encode_side)
+                print("DEBUG type(dataset_info):", type(dataset_info))
+                try:
+                    print("DEBUG len(dataset_info):", len(dataset_info))
+                except Exception:
+                    pass
+
+                if isinstance(dataset_info, list) and len(dataset_info) > 0:
+                    print("DEBUG dataset_info[0] type:", type(dataset_info[0]))
+                    if isinstance(dataset_info[0], dict):
+                        print("DEBUG dataset_info[0] keys:", list(dataset_info[0].keys()))
+                        # Try common candidate name keys
+                        for k in ["cand_name", "label_name", "text", "name"]:
+                            if k in dataset_info[0]:
+                                vals = [d.get(k) for d in dataset_info]
+                                print(f"DEBUG batch '{k}' unique/total:", len(set(vals)), "/", len(vals))
+                                print("DEBUG first 5:", vals[:5])
+                    else:
+                        print("DEBUG dataset_info[0] (repr):", repr(dataset_info[0])[:200])
             inputs = batch_to_device(inputs, training_args.device)
+
             with torch.autocast(enabled=True, dtype=torch.bfloat16, device_type="cuda"):
                 # Determine if encoding query or target based on available keys
                 if encode_side == "qry":
@@ -80,6 +106,8 @@ def encode_embeddings(
                 else:
                     output = model(tgt=inputs)
                     reps = output["tgt_reps"].detach()
+                    if local_rank == 0 and encode_side == "cand" and len(local_gt_infos) < 32:
+                        print("DEBUG reps.shape:", tuple(reps.shape), "len(dataset_info):", len(dataset_info))
                     local_gt_infos.extend([info["cand_name"] for info in dataset_info])  # to retain ground-truth labels
 
             if is_late_interaction and reps.dim() == 3:
@@ -235,7 +263,7 @@ def main():
                 import traceback
                 traceback.print_exc()
                 print_master(e)
-                raise e
+                # raise e
                 continue
 
         # --- 1. Compute Query Embeddings ---
@@ -291,6 +319,20 @@ def main():
             with open(query_embed_path, 'rb') as f: qry_embeds = pickle.load(f)
             with open(cand_embed_path, 'rb') as f: cand_embed_dict = pickle.load(f)
             gt_infos = [json.loads(l) for l in open(dataset_info_path)]
+
+            cand_keys = set(cand_embed_dict.keys())
+            all_needed = set()
+            for info in gt_infos:
+                all_needed.update(info["cand_names"])
+
+            print("cand_embed_dict keys:", len(cand_keys))
+            print("needed cand_names:", len(all_needed))
+
+            missing = sorted(all_needed - cand_keys)
+            print("missing:", len(missing))
+            print("example missing:", missing[:5])
+            print("example existing:", list(sorted(cand_keys))[:5])
+
             pred_dicts = []
 
             rank_against_all_candidates = task_config.get("eval_type", "global") == "global"
